@@ -13,11 +13,11 @@
 
 ## Internal svg image
 
-![Frog](./frog-svgrepo-com.svg)
+![Frog](./frog-svgrepo-com.svg){: width=100 height=100}
 
 ## External svg image
 
-![Frog](https://www.svgrepo.com/download/500113/frog.svg)
+![Frog](https://www.svgrepo.com/download/500113/frog.svg){: width=80 height=80}
 
 ## html format
 

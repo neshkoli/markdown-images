@@ -455,7 +455,11 @@ func downloadAndEncodeExternalImage(imageURL string, targetWidth, targetHeight i
 
 	// Check if it's an SVG (either by MIME type or content)
 	if mimeType == "image/svg+xml" || strings.Contains(strings.ToLower(string(imageData)), "<svg") {
-		// For SVG, just encode the raw content as base64
+		// For SVG, handle scaling if needed
+		if targetWidth > 0 && targetHeight > 0 {
+			imageData = updateSVGDimensions(imageData, targetWidth, targetHeight)
+		}
+		// Encode the raw content as base64
 		base64Data := base64.StdEncoding.EncodeToString(imageData)
 		return base64Data, "image/svg+xml", nil
 	}
@@ -609,7 +613,7 @@ func imageToBase64(imagePath string, targetWidth, targetHeight int) (string, str
 			if strings.Contains(content, "<svg") {
 				// Reset file pointer and handle SVG
 				file.Seek(0, 0)
-				return handleSVGImage(file, imagePath)
+				return handleSVGImage(file, imagePath, targetWidth, targetHeight)
 			}
 		}
 		return "", "", fmt.Errorf("unsupported image format")
@@ -658,16 +662,41 @@ func imageToBase64(imagePath string, targetWidth, targetHeight int) (string, str
 }
 
 // handleSVGImage handles SVG images by reading them as text and encoding as base64
-func handleSVGImage(file *os.File, imagePath string) (string, string, error) {
+func handleSVGImage(file *os.File, imagePath string, targetWidth, targetHeight int) (string, string, error) {
 	// Read the entire SVG content
 	content, err := io.ReadAll(file)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to read SVG file: %v", err)
 	}
 
+	// If scaling is requested, update the SVG width and height attributes
+	if targetWidth > 0 && targetHeight > 0 {
+		content = updateSVGDimensions(content, targetWidth, targetHeight)
+	}
+
 	// Encode SVG content as base64
 	base64Data := base64.StdEncoding.EncodeToString(content)
 	return base64Data, "image/svg+xml", nil
+}
+
+// updateSVGDimensions updates the width and height attributes in SVG content
+func updateSVGDimensions(content []byte, targetWidth, targetHeight int) []byte {
+	contentStr := string(content)
+
+	// Regular expression to match width and height attributes in SVG tag
+	// This handles various formats: width="800px", width='800px', width="800", etc.
+	widthRegex := regexp.MustCompile(`width\s*=\s*["']([^"']*)["']`)
+	heightRegex := regexp.MustCompile(`height\s*=\s*["']([^"']*)["']`)
+
+	// Replace width attribute
+	widthReplacement := fmt.Sprintf(`width="%dpx"`, targetWidth)
+	contentStr = widthRegex.ReplaceAllString(contentStr, widthReplacement)
+
+	// Replace height attribute
+	heightReplacement := fmt.Sprintf(`height="%dpx"`, targetHeight)
+	contentStr = heightRegex.ReplaceAllString(contentStr, heightReplacement)
+
+	return []byte(contentStr)
 }
 
 // isURL checks if the given string is a valid URL
