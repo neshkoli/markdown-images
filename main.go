@@ -171,6 +171,72 @@ func findImageReferences(content string) []ImageReference {
 		})
 	}
 
+	// Find markdown image references with only width: ![alt text](image_path){: width=X}
+	markdownWidthOnlyRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^=)]+)\)(\s*\{:\s*width=(\d+)\s*\})`)
+	markdownWidthOnlyMatches := markdownWidthOnlyRegex.FindAllStringSubmatchIndex(content, -1)
+
+	for _, match := range markdownWidthOnlyMatches {
+		fullMatch := content[match[0]:match[1]]
+		altText := content[match[2]:match[3]]
+		imagePath := content[match[4]:match[5]]
+
+		// Skip if it's already a data URL
+		if strings.HasPrefix(imagePath, "data:") {
+			continue
+		}
+
+		// Parse width attribute
+		width := 0
+		if len(match) > 6 && match[6] != -1 {
+			widthStr := content[match[8]:match[9]]
+			width, _ = strconv.Atoi(widthStr)
+		}
+
+		refs = append(refs, ImageReference{
+			FullMatch: fullMatch,
+			AltText:   altText,
+			ImagePath: imagePath,
+			StartPos:  match[0],
+			EndPos:    match[1],
+			Width:     width,
+			Height:    0,
+			IsHTML:    false,
+		})
+	}
+
+	// Find markdown image references with only height: ![alt text](image_path){: height=Y}
+	markdownHeightOnlyRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^=)]+)\)(\s*\{:\s*height=(\d+)\s*\})`)
+	markdownHeightOnlyMatches := markdownHeightOnlyRegex.FindAllStringSubmatchIndex(content, -1)
+
+	for _, match := range markdownHeightOnlyMatches {
+		fullMatch := content[match[0]:match[1]]
+		altText := content[match[2]:match[3]]
+		imagePath := content[match[4]:match[5]]
+
+		// Skip if it's already a data URL
+		if strings.HasPrefix(imagePath, "data:") {
+			continue
+		}
+
+		// Parse height attribute
+		height := 0
+		if len(match) > 6 && match[6] != -1 {
+			heightStr := content[match[8]:match[9]]
+			height, _ = strconv.Atoi(heightStr)
+		}
+
+		refs = append(refs, ImageReference{
+			FullMatch: fullMatch,
+			AltText:   altText,
+			ImagePath: imagePath,
+			StartPos:  match[0],
+			EndPos:    match[1],
+			Width:     0,
+			Height:    height,
+			IsHTML:    false,
+		})
+	}
+
 	// Find basic markdown image references: ![alt text](image_path)
 	markdownBasicRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^=)]+)\)`)
 	markdownBasicMatches := markdownBasicRegex.FindAllStringSubmatchIndex(content, -1)
@@ -456,7 +522,7 @@ func downloadAndEncodeExternalImage(imageURL string, targetWidth, targetHeight i
 	// Check if it's an SVG (either by MIME type or content)
 	if mimeType == "image/svg+xml" || strings.Contains(strings.ToLower(string(imageData)), "<svg") {
 		// For SVG, handle scaling if needed
-		if targetWidth > 0 && targetHeight > 0 {
+		if targetWidth > 0 || targetHeight > 0 {
 			imageData = updateSVGDimensions(imageData, targetWidth, targetHeight)
 		}
 		// Encode the raw content as base64
@@ -670,7 +736,7 @@ func handleSVGImage(file *os.File, imagePath string, targetWidth, targetHeight i
 	}
 
 	// If scaling is requested, update the SVG width and height attributes
-	if targetWidth > 0 && targetHeight > 0 {
+	if targetWidth > 0 || targetHeight > 0 {
 		content = updateSVGDimensions(content, targetWidth, targetHeight)
 	}
 
@@ -688,12 +754,43 @@ func updateSVGDimensions(content []byte, targetWidth, targetHeight int) []byte {
 	widthRegex := regexp.MustCompile(`width\s*=\s*["']([^"']*)["']`)
 	heightRegex := regexp.MustCompile(`height\s*=\s*["']([^"']*)["']`)
 
+	// Extract original dimensions from SVG
+	widthMatches := widthRegex.FindStringSubmatch(contentStr)
+	heightMatches := heightRegex.FindStringSubmatch(contentStr)
+
+	var originalWidth, originalHeight float64
+	if len(widthMatches) > 1 {
+		// Extract numeric value from width attribute (remove "px" if present)
+		widthStr := strings.TrimSuffix(widthMatches[1], "px")
+		originalWidth, _ = strconv.ParseFloat(widthStr, 64)
+	}
+	if len(heightMatches) > 1 {
+		// Extract numeric value from height attribute (remove "px" if present)
+		heightStr := strings.TrimSuffix(heightMatches[1], "px")
+		originalHeight, _ = strconv.ParseFloat(heightStr, 64)
+	}
+
+	// Calculate target dimensions maintaining aspect ratio
+	finalWidth := targetWidth
+	finalHeight := targetHeight
+
+	// If only one dimension is specified, calculate the other to maintain aspect ratio
+	if originalWidth > 0 && originalHeight > 0 {
+		if targetWidth > 0 && targetHeight == 0 {
+			// Only width specified, calculate height
+			finalHeight = int(float64(targetWidth) * originalHeight / originalWidth)
+		} else if targetHeight > 0 && targetWidth == 0 {
+			// Only height specified, calculate width
+			finalWidth = int(float64(targetHeight) * originalWidth / originalHeight)
+		}
+	}
+
 	// Replace width attribute
-	widthReplacement := fmt.Sprintf(`width="%dpx"`, targetWidth)
+	widthReplacement := fmt.Sprintf(`width="%dpx"`, finalWidth)
 	contentStr = widthRegex.ReplaceAllString(contentStr, widthReplacement)
 
 	// Replace height attribute
-	heightReplacement := fmt.Sprintf(`height="%dpx"`, targetHeight)
+	heightReplacement := fmt.Sprintf(`height="%dpx"`, finalHeight)
 	contentStr = heightRegex.ReplaceAllString(contentStr, heightReplacement)
 
 	return []byte(contentStr)
