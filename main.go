@@ -843,19 +843,13 @@ func resizeImage(img image.Image, targetWidth, targetHeight int) image.Image {
 	srcWidth := bounds.Dx()
 	srcHeight := bounds.Dy()
 
-	// If no dimensions specified, check if image is larger than 200px
+	// If no dimensions are specified, default to a max width of 400px if the image is wider.
 	if targetWidth <= 0 && targetHeight <= 0 {
-		if srcWidth > 200 || srcHeight > 200 {
-			// Calculate new dimensions maintaining aspect ratio with max 200px
-			if srcWidth > srcHeight {
-				targetWidth = 200
-				targetHeight = int(float64(200) * float64(srcHeight) / float64(srcWidth))
-			} else {
-				targetHeight = 200
-				targetWidth = int(float64(200) * float64(srcWidth) / float64(srcHeight))
-			}
+		if srcWidth > 400 {
+			targetWidth = 400
+			targetHeight = int(float64(targetWidth) * float64(srcHeight) / float64(srcWidth))
 		} else {
-			// Image is already small enough, return original
+			// Image is already within the default size, return original
 			return img
 		}
 	} else {
@@ -865,8 +859,11 @@ func resizeImage(img image.Image, targetWidth, targetHeight int) image.Image {
 		} else if targetHeight > 0 && targetWidth == 0 {
 			targetWidth = int(float64(targetHeight) * float64(srcWidth) / float64(srcHeight))
 		}
-		// Note: We don't limit user-specified dimensions to 200px
-		// The user knows what they want, so we respect their choice
+	}
+
+	// If there's nothing to do, return original image
+	if targetWidth == srcWidth && targetHeight == srcHeight {
+		return img
 	}
 
 	// Create new image with target dimensions
