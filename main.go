@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -80,11 +81,18 @@ func processMarkdown(content, baseDir string, debugMode bool) (string, error) {
 	// Find all image references in the markdown (both markdown and HTML)
 	imageRefs := findImageReferences(content)
 
-	// Process each image reference
-	result := content
-	offset := 0 // Track position adjustments due to replacements
+	// Sort references by start position to process them in order
+	sort.Slice(imageRefs, func(i, j int) bool {
+		return imageRefs[i].StartPos < imageRefs[j].StartPos
+	})
+
+	var builder strings.Builder
+	lastIndex := 0
 
 	for _, imgRef := range imageRefs {
+		// Append content before the image tag
+		builder.WriteString(content[lastIndex:imgRef.StartPos])
+
 		// Debug output
 		if debugMode {
 			log.Printf("Processing image: %s, Width: %d, Height: %d", imgRef.ImagePath, imgRef.Width, imgRef.Height)
@@ -105,39 +113,34 @@ func processMarkdown(content, baseDir string, debugMode bool) (string, error) {
 		// Convert image to base64
 		base64Data, mimeType, err := imageToBase64(fullImagePath, imgRef.Width, imgRef.Height)
 		if err != nil {
-			log.Printf("Warning: Could not convert image %s to base64: %v", imgRef.ImagePath, err)
+			log.Printf("Warning: Could not convert image %s to base64: %v. Keeping original reference.", imgRef.ImagePath, err)
+			builder.WriteString(imgRef.FullMatch) // Keep original on error
+			lastIndex = imgRef.EndPos
 			continue
 		}
 
 		// Create the new base64 image reference
-		var newImageRef string
-		if imgRef.IsHTML {
-			// Convert HTML img to markdown format
-			newImageRef = fmt.Sprintf("![%s](data:%s;base64,%s)", imgRef.AltText, mimeType, base64Data)
-		} else {
-			// Keep markdown format, but remove size attributes since image is already resized
-			newImageRef = fmt.Sprintf("![%s](data:%s;base64,%s)", imgRef.AltText, mimeType, base64Data)
-		}
+		newImageRef := fmt.Sprintf("![%s](data:%s;base64,%s)", imgRef.AltText, mimeType, base64Data)
 
-		// Replace the original reference
-		adjustedStart := imgRef.StartPos + offset
-		adjustedEnd := imgRef.EndPos + offset
+		// Append the new reference
+		builder.WriteString(newImageRef)
 
-		result = result[:adjustedStart] + newImageRef + result[adjustedEnd:]
-
-		// Update offset for next replacements
-		offset += len(newImageRef) - (imgRef.EndPos - imgRef.StartPos)
+		// Update lastIndex
+		lastIndex = imgRef.EndPos
 	}
 
-	return result, nil
+	// Append the rest of the content
+	builder.WriteString(content[lastIndex:])
+
+	return builder.String(), nil
 }
 
 // findImageReferences finds all image references in markdown content (both markdown and HTML)
 func findImageReferences(content string) []ImageReference {
 	var refs []ImageReference
 
-	// Find markdown image references: ![alt text](image_path){: width=X height=Y}
-	markdownRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^=)]+)\)(\s*\{:\s*width=(\d+)\s*height=(\d+)\s*\})`)
+	// Regex for Markdown: ![alt](path){: width=W height=H}, ![alt](path){: width=W}, ![alt](path){: height=H}, and ![alt](path)
+	markdownRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+?)\)(?:\{:\s*(?:width=(\d+))?\s*(?:height=(\d+))?\s*\})?`)
 	markdownMatches := markdownRegex.FindAllStringSubmatchIndex(content, -1)
 
 	for _, match := range markdownMatches {
@@ -150,13 +153,17 @@ func findImageReferences(content string) []ImageReference {
 			continue
 		}
 
-		// Parse size attributes if present
+		// Skip if it matches the WxH syntax, which is handled by another regex
+		if strings.Contains(imagePath, "=") {
+			continue
+		}
+
 		width, height := 0, 0
-		if len(match) > 8 && match[6] != -1 && match[7] != -1 {
-			widthStr := content[match[8]:match[9]]
-			heightStr := content[match[10]:match[11]]
-			width, _ = strconv.Atoi(widthStr)
-			height, _ = strconv.Atoi(heightStr)
+		if len(match) > 6 && match[6] != -1 { // width
+			width, _ = strconv.Atoi(content[match[6]:match[7]])
+		}
+		if len(match) > 8 && match[8] != -1 { // height
+			height, _ = strconv.Atoi(content[match[8]:match[9]])
 		}
 
 		refs = append(refs, ImageReference{
@@ -167,113 +174,6 @@ func findImageReferences(content string) []ImageReference {
 			EndPos:    match[1],
 			Width:     width,
 			Height:    height,
-			IsHTML:    false,
-		})
-	}
-
-	// Find markdown image references with only width: ![alt text](image_path){: width=X}
-	markdownWidthOnlyRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^=)]+)\)(\s*\{:\s*width=(\d+)\s*\})`)
-	markdownWidthOnlyMatches := markdownWidthOnlyRegex.FindAllStringSubmatchIndex(content, -1)
-
-	for _, match := range markdownWidthOnlyMatches {
-		fullMatch := content[match[0]:match[1]]
-		altText := content[match[2]:match[3]]
-		imagePath := content[match[4]:match[5]]
-
-		// Skip if it's already a data URL
-		if strings.HasPrefix(imagePath, "data:") {
-			continue
-		}
-
-		// Parse width attribute
-		width := 0
-		if len(match) > 6 && match[6] != -1 {
-			widthStr := content[match[8]:match[9]]
-			width, _ = strconv.Atoi(widthStr)
-		}
-
-		refs = append(refs, ImageReference{
-			FullMatch: fullMatch,
-			AltText:   altText,
-			ImagePath: imagePath,
-			StartPos:  match[0],
-			EndPos:    match[1],
-			Width:     width,
-			Height:    0,
-			IsHTML:    false,
-		})
-	}
-
-	// Find markdown image references with only height: ![alt text](image_path){: height=Y}
-	markdownHeightOnlyRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^=)]+)\)(\s*\{:\s*height=(\d+)\s*\})`)
-	markdownHeightOnlyMatches := markdownHeightOnlyRegex.FindAllStringSubmatchIndex(content, -1)
-
-	for _, match := range markdownHeightOnlyMatches {
-		fullMatch := content[match[0]:match[1]]
-		altText := content[match[2]:match[3]]
-		imagePath := content[match[4]:match[5]]
-
-		// Skip if it's already a data URL
-		if strings.HasPrefix(imagePath, "data:") {
-			continue
-		}
-
-		// Parse height attribute
-		height := 0
-		if len(match) > 6 && match[6] != -1 {
-			heightStr := content[match[8]:match[9]]
-			height, _ = strconv.Atoi(heightStr)
-		}
-
-		refs = append(refs, ImageReference{
-			FullMatch: fullMatch,
-			AltText:   altText,
-			ImagePath: imagePath,
-			StartPos:  match[0],
-			EndPos:    match[1],
-			Width:     0,
-			Height:    height,
-			IsHTML:    false,
-		})
-	}
-
-	// Find basic markdown image references: ![alt text](image_path)
-	markdownBasicRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^=)]+)\)`)
-	markdownBasicMatches := markdownBasicRegex.FindAllStringSubmatchIndex(content, -1)
-
-	for _, match := range markdownBasicMatches {
-		fullMatch := content[match[0]:match[1]]
-		altText := content[match[2]:match[3]]
-		imagePath := content[match[4]:match[5]]
-
-		// Skip if it's already a data URL
-		if strings.HasPrefix(imagePath, "data:") {
-			continue
-		}
-
-		// Skip if this matches the new syntax (will be handled by the next regex)
-		if strings.Contains(fullMatch, " =") {
-			continue
-		}
-
-		// Skip if this has size attributes (will be handled by the first regex)
-		// Check if there are size attributes after this match
-		endPos := match[1]
-		if endPos < len(content) {
-			remainingContent := content[endPos:]
-			if strings.HasPrefix(strings.TrimSpace(remainingContent), "{:") {
-				continue
-			}
-		}
-
-		refs = append(refs, ImageReference{
-			FullMatch: fullMatch,
-			AltText:   altText,
-			ImagePath: imagePath,
-			StartPos:  match[0],
-			EndPos:    match[1],
-			Width:     0,
-			Height:    0,
 			IsHTML:    false,
 		})
 	}
@@ -310,23 +210,31 @@ func findImageReferences(content string) []ImageReference {
 	}
 
 	// Find HTML img tags: <img src="..." alt="..." width="..." height="...">
-	htmlRegex := regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*width=["'](\d+)["'][^>]*height=["'](\d+)["'][^>]*>`)
+	htmlRegex := regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*>`)
 	htmlMatches := htmlRegex.FindAllStringSubmatchIndex(content, -1)
+
+	widthRegex := regexp.MustCompile(`width=["'](\d+)["']`)
+	heightRegex := regexp.MustCompile(`height=["'](\d+)["']`)
 
 	for _, match := range htmlMatches {
 		fullMatch := content[match[0]:match[1]]
 		imagePath := content[match[2]:match[3]]
 		altText := content[match[4]:match[5]]
-		widthStr := content[match[6]:match[7]]
-		heightStr := content[match[8]:match[9]]
 
 		// Skip if it's already a data URL
 		if strings.HasPrefix(imagePath, "data:") {
 			continue
 		}
 
-		width, _ := strconv.Atoi(widthStr)
-		height, _ := strconv.Atoi(heightStr)
+		width, height := 0, 0
+		widthSubmatch := widthRegex.FindStringSubmatch(fullMatch)
+		if len(widthSubmatch) > 1 {
+			width, _ = strconv.Atoi(widthSubmatch[1])
+		}
+		heightSubmatch := heightRegex.FindStringSubmatch(fullMatch)
+		if len(heightSubmatch) > 1 {
+			height, _ = strconv.Atoi(heightSubmatch[1])
+		}
 
 		refs = append(refs, ImageReference{
 			FullMatch: fullMatch,
@@ -336,44 +244,6 @@ func findImageReferences(content string) []ImageReference {
 			EndPos:    match[1],
 			Width:     width,
 			Height:    height,
-			IsHTML:    true,
-		})
-	}
-
-	// Also find HTML img tags without size attributes
-	htmlSimpleRegex := regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*>`)
-	htmlSimpleMatches := htmlSimpleRegex.FindAllStringSubmatchIndex(content, -1)
-
-	for _, match := range htmlSimpleMatches {
-		fullMatch := content[match[0]:match[1]]
-		imagePath := content[match[2]:match[3]]
-		altText := content[match[4]:match[5]]
-
-		// Skip if it's already a data URL
-		if strings.HasPrefix(imagePath, "data:") {
-			continue
-		}
-
-		// Skip if we already processed this as a sized img tag
-		alreadyProcessed := false
-		for _, ref := range refs {
-			if ref.StartPos == match[0] && ref.EndPos == match[1] {
-				alreadyProcessed = true
-				break
-			}
-		}
-		if alreadyProcessed {
-			continue
-		}
-
-		refs = append(refs, ImageReference{
-			FullMatch: fullMatch,
-			AltText:   altText,
-			ImagePath: imagePath,
-			StartPos:  match[0],
-			EndPos:    match[1],
-			Width:     0,
-			Height:    0,
 			IsHTML:    true,
 		})
 	}
@@ -531,7 +401,7 @@ func downloadAndEncodeExternalImage(imageURL string, targetWidth, targetHeight i
 	}
 
 	// If resizing is needed, decode the image, resize it, and re-encode
-	if targetWidth > 0 && targetHeight > 0 {
+	if targetWidth > 0 || targetHeight > 0 {
 		// Create a reader from the image data
 		reader := bytes.NewReader(imageData)
 
@@ -686,7 +556,7 @@ func imageToBase64(imagePath string, targetWidth, targetHeight int) (string, str
 	}
 
 	// Resize image if needed
-	if targetWidth > 0 && targetHeight > 0 {
+	if targetWidth > 0 || targetHeight > 0 {
 		img = resizeImage(img, targetWidth, targetHeight)
 	}
 
