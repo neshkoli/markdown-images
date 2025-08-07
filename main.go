@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image"
-	"image/color"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
@@ -39,35 +38,23 @@ type ImageReference struct {
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: go run main.go <markdown-file> [--debug]")
-		fmt.Println("Example: go run main.go image-example.md")
-		fmt.Println("Example: go run main.go image-example.md --debug")
 		os.Exit(1)
 	}
 
 	inputFile := os.Args[1]
-	debugMode := false
+	debugMode := len(os.Args) > 2 && os.Args[2] == "--debug"
 
-	// Check for debug flag
-	if len(os.Args) > 2 && os.Args[2] == "--debug" {
-		debugMode = true
-	}
-
-	// Read the markdown file
 	content, err := os.ReadFile(inputFile)
 	if err != nil {
 		log.Fatalf("Error reading file %s: %v", inputFile, err)
 	}
 
-	// Process the markdown content
 	processedContent, err := processMarkdown(string(content), filepath.Dir(inputFile), debugMode)
 	if err != nil {
 		log.Fatalf("Error processing markdown: %v", err)
 	}
 
-	// Create output filename
 	outputFile := strings.TrimSuffix(inputFile, filepath.Ext(inputFile)) + "_embedded.md"
-
-	// Write the processed content to output file
 	err = os.WriteFile(outputFile, []byte(processedContent), 0644)
 	if err != nil {
 		log.Fatalf("Error writing output file %s: %v", outputFile, err)
@@ -76,12 +63,8 @@ func main() {
 	fmt.Printf("Successfully processed %s -> %s\n", inputFile, outputFile)
 }
 
-// processMarkdown processes markdown content and embeds images as base64
 func processMarkdown(content, baseDir string, debugMode bool) (string, error) {
-	// Find all image references in the markdown (both markdown and HTML)
 	imageRefs := findImageReferences(content)
-
-	// Sort references by start position to process them in order
 	sort.Slice(imageRefs, func(i, j int) bool {
 		return imageRefs[i].StartPos < imageRefs[j].StartPos
 	})
@@ -90,150 +73,79 @@ func processMarkdown(content, baseDir string, debugMode bool) (string, error) {
 	lastIndex := 0
 
 	for _, imgRef := range imageRefs {
-		// Append content before the image tag
 		builder.WriteString(content[lastIndex:imgRef.StartPos])
 
-		// Debug output
 		if debugMode {
 			log.Printf("Processing image: %s, Width: %d, Height: %d", imgRef.ImagePath, imgRef.Width, imgRef.Height)
 		}
 
-		// Determine the full path for the image
-		var fullImagePath string
-		if isURL(imgRef.ImagePath) {
-			fullImagePath = imgRef.ImagePath
-			// Debug URL if debug mode is enabled
-			if debugMode {
-				debugURL(fullImagePath)
-			}
-		} else {
-			fullImagePath = filepath.Join(baseDir, imgRef.ImagePath)
-		}
-
-		// Convert image to base64
-		base64Data, mimeType, err := imageToBase64(fullImagePath, imgRef.Width, imgRef.Height)
+		base64Data, mimeType, err := imageToBase64(imgRef, baseDir, debugMode)
 		if err != nil {
 			log.Printf("Warning: Could not convert image %s to base64: %v. Keeping original reference.", imgRef.ImagePath, err)
-			builder.WriteString(imgRef.FullMatch) // Keep original on error
-			lastIndex = imgRef.EndPos
-			continue
+			builder.WriteString(imgRef.FullMatch)
+		} else {
+			newImageRef := fmt.Sprintf("![%s](data:%s;base64,%s)", imgRef.AltText, mimeType, base64Data)
+			builder.WriteString(newImageRef)
 		}
-
-		// Create the new base64 image reference
-		newImageRef := fmt.Sprintf("![%s](data:%s;base64,%s)", imgRef.AltText, mimeType, base64Data)
-
-		// Append the new reference
-		builder.WriteString(newImageRef)
-
-		// Update lastIndex
 		lastIndex = imgRef.EndPos
 	}
 
-	// Append the rest of the content
 	builder.WriteString(content[lastIndex:])
-
 	return builder.String(), nil
 }
 
-// findImageReferences finds all image references in markdown content (both markdown and HTML)
 func findImageReferences(content string) []ImageReference {
 	var refs []ImageReference
-
-	// Regex for Markdown: ![alt](path){: width=W height=H}, ![alt](path){: width=W}, ![alt](path){: height=H}, and ![alt](path)
+	// Regex for Markdown: ![alt](path){: width=W height=H}
 	markdownRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+?)\)(?:\{:\s*(?:width=(\d+))?\s*(?:height=(\d+))?\s*\})?`)
-	markdownMatches := markdownRegex.FindAllStringSubmatchIndex(content, -1)
+	// Regex for HTML: <img src="..." alt="..." width="..." height="...">
+	htmlRegex := regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*>`)
 
-	for _, match := range markdownMatches {
-		fullMatch := content[match[0]:match[1]]
-		altText := content[match[2]:match[3]]
+	// Process Markdown matches
+	for _, match := range markdownRegex.FindAllStringSubmatchIndex(content, -1) {
 		imagePath := content[match[4]:match[5]]
-
-		// Skip if it's already a data URL
 		if strings.HasPrefix(imagePath, "data:") {
 			continue
 		}
 
-		// Skip if it matches the WxH syntax, which is handled by another regex
-		if strings.Contains(imagePath, "=") {
-			continue
-		}
-
-		width, height := 0, 0
-		if len(match) > 6 && match[6] != -1 { // width
+		var width, height int
+		if match[6] != -1 && match[7] != -1 {
 			width, _ = strconv.Atoi(content[match[6]:match[7]])
 		}
-		if len(match) > 8 && match[8] != -1 { // height
+		if match[8] != -1 && match[9] != -1 {
 			height, _ = strconv.Atoi(content[match[8]:match[9]])
 		}
 
 		refs = append(refs, ImageReference{
-			FullMatch: fullMatch,
-			AltText:   altText,
+			FullMatch: content[match[0]:match[1]],
+			AltText:   content[match[2]:match[3]],
 			ImagePath: imagePath,
 			StartPos:  match[0],
 			EndPos:    match[1],
 			Width:     width,
 			Height:    height,
-			IsHTML:    false,
 		})
 	}
 
-	// Find markdown image references with new syntax: ![alt text](image_path =WxH)
-	markdownNewRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^=)]+?)\s*=\s*(\d+)x(\d+)\)`)
-	markdownNewMatches := markdownNewRegex.FindAllStringSubmatchIndex(content, -1)
-
-	for _, match := range markdownNewMatches {
-		fullMatch := content[match[0]:match[1]]
-		altText := content[match[2]:match[3]]
-		imagePath := content[match[4]:match[5]]
-		widthStr := content[match[6]:match[7]]
-		heightStr := content[match[8]:match[9]]
-
-		// Skip if it's already a data URL
-		if strings.HasPrefix(imagePath, "data:") {
-			continue
-		}
-
-		width, _ := strconv.Atoi(widthStr)
-		height, _ := strconv.Atoi(heightStr)
-
-		refs = append(refs, ImageReference{
-			FullMatch: fullMatch,
-			AltText:   altText,
-			ImagePath: imagePath,
-			StartPos:  match[0],
-			EndPos:    match[1],
-			Width:     width,
-			Height:    height,
-			IsHTML:    false,
-		})
-	}
-
-	// Find HTML img tags: <img src="..." alt="..." width="..." height="...">
-	htmlRegex := regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*>`)
-	htmlMatches := htmlRegex.FindAllStringSubmatchIndex(content, -1)
-
-	widthRegex := regexp.MustCompile(`width=["'](\d+)["']`)
-	heightRegex := regexp.MustCompile(`height=["'](\d+)["']`)
-
-	for _, match := range htmlMatches {
+	// Process HTML matches
+	htmlWidthRegex := regexp.MustCompile(`width=["'](\d+)["']`)
+	htmlHeightRegex := regexp.MustCompile(`height=["'](\d+)["']`)
+	for _, match := range htmlRegex.FindAllStringSubmatchIndex(content, -1) {
 		fullMatch := content[match[0]:match[1]]
 		imagePath := content[match[2]:match[3]]
-		altText := content[match[4]:match[5]]
-
-		// Skip if it's already a data URL
 		if strings.HasPrefix(imagePath, "data:") {
 			continue
 		}
+		altText := content[match[4]:match[5]]
 
-		width, height := 0, 0
-		widthSubmatch := widthRegex.FindStringSubmatch(fullMatch)
-		if len(widthSubmatch) > 1 {
-			width, _ = strconv.Atoi(widthSubmatch[1])
+		var width, height int
+		widthMatch := htmlWidthRegex.FindStringSubmatch(fullMatch)
+		if len(widthMatch) > 1 {
+			width, _ = strconv.Atoi(widthMatch[1])
 		}
-		heightSubmatch := heightRegex.FindStringSubmatch(fullMatch)
-		if len(heightSubmatch) > 1 {
-			height, _ = strconv.Atoi(heightSubmatch[1])
+		heightMatch := htmlHeightRegex.FindStringSubmatch(fullMatch)
+		if len(heightMatch) > 1 {
+			height, _ = strconv.Atoi(heightMatch[1])
 		}
 
 		refs = append(refs, ImageReference{
@@ -251,650 +163,114 @@ func findImageReferences(content string) []ImageReference {
 	return refs
 }
 
-// ppmDecode decodes a PPM image
-func ppmDecode(r io.Reader) (image.Image, error) {
-	// PPM files start with "P6" for binary format
-	// This is a simplified PPM decoder for P6 format (binary)
-
-	// Read the magic number
-	magic := make([]byte, 2)
-	if _, err := io.ReadFull(r, magic); err != nil {
-		return nil, fmt.Errorf("failed to read PPM magic number: %v", err)
-	}
-
-	if string(magic) != "P6" {
-		return nil, fmt.Errorf("unsupported PPM format: %s", string(magic))
-	}
-
-	// Skip whitespace and comments
-	var width, height, maxVal int
+func imageToBase64(ref ImageReference, baseDir string, debugMode bool) (string, string, error) {
+	var content []byte
 	var err error
 
-	// Read dimensions and max value
-	_, err = fmt.Fscanf(r, "%d %d %d", &width, &height, &maxVal)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read PPM dimensions: %v", err)
-	}
-
-	// Skip any remaining whitespace and newline
-	var c byte
-	for {
-		c, err = readByte(r)
+	if isURL(ref.ImagePath) {
+		content, err = downloadImageContent(ref.ImagePath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read PPM header: %v", err)
-		}
-		if c == '\n' {
-			break
-		}
-	}
-
-	// Create image
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
-
-	// Read pixel data
-	if maxVal <= 255 {
-		// 8-bit per channel - read all pixels at once for efficiency
-		pixelData := make([]byte, width*height*3)
-		if _, err := io.ReadFull(r, pixelData); err != nil {
-			return nil, fmt.Errorf("failed to read PPM pixel data: %v", err)
-		}
-
-		for y := 0; y < height; y++ {
-			for x := 0; x < width; x++ {
-				idx := (y*width + x) * 3
-				img.Set(x, y, color.RGBA{pixelData[idx], pixelData[idx+1], pixelData[idx+2], 255})
-			}
+			return "", "", fmt.Errorf("failed to download image: %v", err)
 		}
 	} else {
-		// 16-bit per channel (big-endian) - read all pixels at once
-		pixelData := make([]byte, width*height*6)
-		if _, err := io.ReadFull(r, pixelData); err != nil {
-			return nil, fmt.Errorf("failed to read PPM pixel data: %v", err)
-		}
-
-		for y := 0; y < height; y++ {
-			for x := 0; x < width; x++ {
-				idx := (y*width + x) * 6
-				// Convert 16-bit to 8-bit
-				r8 := uint8((uint16(pixelData[idx])<<8 | uint16(pixelData[idx+1])) >> 8)
-				g8 := uint8((uint16(pixelData[idx+2])<<8 | uint16(pixelData[idx+3])) >> 8)
-				b8 := uint8((uint16(pixelData[idx+4])<<8 | uint16(pixelData[idx+5])) >> 8)
-				img.Set(x, y, color.RGBA{r8, g8, b8, 255})
-			}
+		fullPath := filepath.Join(baseDir, ref.ImagePath)
+		content, err = os.ReadFile(fullPath)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to read image file: %v", err)
 		}
 	}
 
-	return img, nil
-}
-
-func readByte(r io.Reader) (byte, error) {
-	buf := make([]byte, 1)
-	_, err := io.ReadFull(r, buf)
-	return buf[0], err
-}
-
-// downloadAndEncodeExternalImage downloads an external image and encodes its raw binary data to base64
-func downloadAndEncodeExternalImage(imageURL string, targetWidth, targetHeight int) (string, string, error) {
-	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 30 * time.Second,
+	// Check for SVG first, as it's text-based
+	if strings.Contains(strings.ToLower(string(content)), "<svg") {
+		if ref.Width > 0 || ref.Height > 0 {
+			content = updateSVGDimensions(content, ref.Width, ref.Height)
+		}
+		return base64.StdEncoding.EncodeToString(content), "image/svg+xml", nil
 	}
 
-	// Create request with proper headers
-	req, err := http.NewRequest("GET", imageURL, nil)
+	img, format, err := image.Decode(bytes.NewReader(content))
 	if err != nil {
-		return "", "", fmt.Errorf("failed to create request: %v", err)
+		return "", "", fmt.Errorf("unsupported image format: %v", err)
 	}
 
-	// Add headers to mimic a real browser request
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Accept", "image/*,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	// Don't request compression for images to avoid encoding issues
+	img = resizeImage(img, ref.Width, ref.Height)
 
-	// Make the request
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to download image: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Check if the request was successful
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("failed to download image: HTTP %d", resp.StatusCode)
-	}
-
-	// Read the entire response body (the raw image data)
-	imageData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to read image data: %v", err)
-	}
-
-	// Determine MIME type from Content-Type header
-	mimeType := resp.Header.Get("Content-Type")
-	if mimeType == "" {
-		// Fallback: try to determine from URL extension
-		if strings.HasSuffix(strings.ToLower(imageURL), ".png") {
-			mimeType = "image/png"
-		} else if strings.HasSuffix(strings.ToLower(imageURL), ".jpg") || strings.HasSuffix(strings.ToLower(imageURL), ".jpeg") {
-			mimeType = "image/jpeg"
-		} else if strings.HasSuffix(strings.ToLower(imageURL), ".gif") {
-			mimeType = "image/gif"
-		} else if strings.HasSuffix(strings.ToLower(imageURL), ".webp") {
-			mimeType = "image/webp"
-		} else if strings.HasSuffix(strings.ToLower(imageURL), ".svg") {
-			mimeType = "image/svg+xml"
-		} else {
-			mimeType = "image/jpeg" // default fallback
-		}
-	}
-
-	// Check if it's an SVG (either by MIME type or content)
-	if mimeType == "image/svg+xml" || strings.Contains(strings.ToLower(string(imageData)), "<svg") {
-		// For SVG, handle scaling if needed
-		if targetWidth > 0 || targetHeight > 0 {
-			imageData = updateSVGDimensions(imageData, targetWidth, targetHeight)
-		}
-		// Encode the raw content as base64
-		base64Data := base64.StdEncoding.EncodeToString(imageData)
-		return base64Data, "image/svg+xml", nil
-	}
-
-	// If resizing is needed, decode the image, resize it, and re-encode
-	if targetWidth > 0 || targetHeight > 0 {
-		// Create a reader from the image data
-		reader := bytes.NewReader(imageData)
-
-		// Try different image formats to decode
-		decoders := []struct {
-			name   string
-			decode func(io.Reader) (image.Image, error)
-		}{
-			{"PNG", png.Decode},
-			{"JPEG", jpeg.Decode},
-			{"GIF", gif.Decode},
-			{"PPM", ppmDecode},
-		}
-
-		var img image.Image
-		var format string
-
-		for _, decoder := range decoders {
-			// Reset reader
-			reader.Seek(0, 0)
-
-			// Try to decode
-			if decodedImg, err := decoder.decode(reader); err == nil {
-				img = decodedImg
-				format = decoder.name
-				break
-			}
-		}
-
-		if img != nil {
-			// Resize the image
-			img = resizeImage(img, targetWidth, targetHeight)
-
-			// Encode to appropriate format
-			var encodeBuf bytes.Buffer
-			var encoder func(io.Writer, image.Image) error
-
-			// Determine MIME type and choose encoder
-			switch strings.ToUpper(format) {
-			case "PNG":
-				mimeType = "image/png"
-				encoder = png.Encode
-			case "GIF":
-				mimeType = "image/gif"
-				encoder = func(w io.Writer, m image.Image) error {
-					return gif.Encode(w, m, nil)
-				}
-			case "PPM":
-				// Convert PPM to PNG for better compatibility
-				mimeType = "image/png"
-				encoder = png.Encode
-			default:
-				// For JPEG and other formats, use JPEG encoder
-				mimeType = "image/jpeg"
-				encoder = func(w io.Writer, m image.Image) error {
-					return jpeg.Encode(w, m, &jpeg.Options{Quality: 85})
-				}
-			}
-
-			// Encode the image
-			if err := encoder(&encodeBuf, img); err != nil {
-				return "", "", fmt.Errorf("failed to encode resized image: %v", err)
-			}
-
-			// Convert to base64
-			base64Data := base64.StdEncoding.EncodeToString(encodeBuf.Bytes())
-			return base64Data, mimeType, nil
-		} else {
-			// If decoding failed, try to determine the issue and provide better error handling
-			// Check if the image data is valid by trying to detect the format
-			if len(imageData) > 8 {
-				// Check for PNG signature
-				if imageData[0] == 0x89 && imageData[1] == 0x50 && imageData[2] == 0x4E && imageData[3] == 0x47 {
-					// It's a PNG but failed to decode, return raw data
-					base64Data := base64.StdEncoding.EncodeToString(imageData)
-					return base64Data, "image/png", nil
-				}
-				// Check for JPEG signature
-				if imageData[0] == 0xFF && imageData[1] == 0xD8 {
-					// It's a JPEG but failed to decode, return raw data
-					base64Data := base64.StdEncoding.EncodeToString(imageData)
-					return base64Data, "image/jpeg", nil
-				}
-			}
-			// If we can't determine the format, return raw data with original mime type
-			base64Data := base64.StdEncoding.EncodeToString(imageData)
-			return base64Data, mimeType, nil
-		}
-	}
-
-	// If no resizing needed or decoding failed, encode the raw binary data to base64
-	base64Data := base64.StdEncoding.EncodeToString(imageData)
-	return base64Data, mimeType, nil
-}
-
-func imageToBase64(imagePath string, targetWidth, targetHeight int) (string, string, error) {
-	// Check if it's a URL - handle external images differently
-	if isURL(imagePath) {
-		return downloadAndEncodeExternalImage(imagePath, targetWidth, targetHeight)
-	}
-
-	// For local images, use the existing logic
-	var err error
-
-	// Open the image file
-	file, err := os.Open(imagePath)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to open image file: %v", err)
-	}
-	defer file.Close()
-
-	// Try different image formats
-	decoders := []struct {
-		name   string
-		decode func(io.Reader) (image.Image, error)
-	}{
-		{"PNG", png.Decode},
-		{"JPEG", jpeg.Decode},
-		{"GIF", gif.Decode},
-		{"PPM", ppmDecode},
-	}
-
-	var img image.Image
-	var format string
-
-	for _, decoder := range decoders {
-		// Reset file pointer
-		file.Seek(0, 0)
-
-		// Try to decode
-		if decodedImg, err := decoder.decode(file); err == nil {
-			img = decodedImg
-			format = decoder.name
-			break
-		}
-	}
-
-	// If no decoder worked, check if it's an SVG
-	if img == nil {
-		file.Seek(0, 0)
-		svgBuf := make([]byte, 1024)
-		n, err := file.Read(svgBuf)
-		if err == nil {
-			content := strings.ToLower(string(svgBuf[:n]))
-			if strings.Contains(content, "<svg") {
-				// Reset file pointer and handle SVG
-				file.Seek(0, 0)
-				return handleSVGImage(file, imagePath, targetWidth, targetHeight)
-			}
-		}
-		return "", "", fmt.Errorf("unsupported image format")
-	}
-
-	// Resize image if needed
-	if targetWidth > 0 || targetHeight > 0 {
-		img = resizeImage(img, targetWidth, targetHeight)
-	}
-
-	// Encode to appropriate format
 	var encodeBuf bytes.Buffer
-	var encoder func(io.Writer, image.Image) error
-
-	// Determine MIME type and choose encoder
-	mimeType := "image/jpeg" // default
-	switch strings.ToUpper(format) {
-	case "PNG":
+	var mimeType string
+	switch format {
+	case "png":
 		mimeType = "image/png"
-		encoder = png.Encode
-	case "GIF":
+		err = png.Encode(&encodeBuf, img)
+	case "gif":
 		mimeType = "image/gif"
-		encoder = func(w io.Writer, m image.Image) error {
-			return gif.Encode(w, m, nil)
-		}
-	case "PPM":
-		// Convert PPM to PNG for better compatibility
-		mimeType = "image/png"
-		encoder = png.Encode
-	default:
-		// For JPEG and other formats, use JPEG encoder
+		err = gif.Encode(&encodeBuf, img, nil)
+	default: // jpeg and others
 		mimeType = "image/jpeg"
-		encoder = func(w io.Writer, m image.Image) error {
-			return jpeg.Encode(w, m, &jpeg.Options{Quality: 85})
-		}
+		err = jpeg.Encode(&encodeBuf, img, &jpeg.Options{Quality: 85})
 	}
 
-	// Encode the image
-	if err := encoder(&encodeBuf, img); err != nil {
-		return "", "", fmt.Errorf("failed to encode image: %v", err)
-	}
-
-	// Convert to base64
-	base64Data := base64.StdEncoding.EncodeToString(encodeBuf.Bytes())
-	return base64Data, mimeType, nil
-}
-
-// handleSVGImage handles SVG images by reading them as text and encoding as base64
-func handleSVGImage(file *os.File, imagePath string, targetWidth, targetHeight int) (string, string, error) {
-	// Read the entire SVG content
-	content, err := io.ReadAll(file)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to read SVG file: %v", err)
+		return "", "", fmt.Errorf("failed to re-encode image: %v", err)
 	}
 
-	// If scaling is requested, update the SVG width and height attributes
-	if targetWidth > 0 || targetHeight > 0 {
-		content = updateSVGDimensions(content, targetWidth, targetHeight)
-	}
-
-	// Encode SVG content as base64
-	base64Data := base64.StdEncoding.EncodeToString(content)
-	return base64Data, "image/svg+xml", nil
+	return base64.StdEncoding.EncodeToString(encodeBuf.Bytes()), mimeType, nil
 }
 
-// updateSVGDimensions updates the width and height attributes in SVG content
-func updateSVGDimensions(content []byte, targetWidth, targetHeight int) []byte {
-	contentStr := string(content)
-
-	// Regular expression to match width and height attributes in SVG tag
-	// This handles various formats: width="800px", width='800px', width="800", etc.
-	widthRegex := regexp.MustCompile(`width\s*=\s*["']([^"']*)["']`)
-	heightRegex := regexp.MustCompile(`height\s*=\s*["']([^"']*)["']`)
-
-	// Extract original dimensions from SVG
-	widthMatches := widthRegex.FindStringSubmatch(contentStr)
-	heightMatches := heightRegex.FindStringSubmatch(contentStr)
-
-	var originalWidth, originalHeight float64
-	if len(widthMatches) > 1 {
-		// Extract numeric value from width attribute (remove "px" if present)
-		widthStr := strings.TrimSuffix(widthMatches[1], "px")
-		originalWidth, _ = strconv.ParseFloat(widthStr, 64)
-	}
-	if len(heightMatches) > 1 {
-		// Extract numeric value from height attribute (remove "px" if present)
-		heightStr := strings.TrimSuffix(heightMatches[1], "px")
-		originalHeight, _ = strconv.ParseFloat(heightStr, 64)
-	}
-
-	// Calculate target dimensions maintaining aspect ratio
-	finalWidth := targetWidth
-	finalHeight := targetHeight
-
-	// If only one dimension is specified, calculate the other to maintain aspect ratio
-	if originalWidth > 0 && originalHeight > 0 {
-		if targetWidth > 0 && targetHeight == 0 {
-			// Only width specified, calculate height
-			finalHeight = int(float64(targetWidth) * originalHeight / originalWidth)
-		} else if targetHeight > 0 && targetWidth == 0 {
-			// Only height specified, calculate width
-			finalWidth = int(float64(targetHeight) * originalWidth / originalHeight)
-		}
-	}
-
-	// Replace width attribute
-	widthReplacement := fmt.Sprintf(`width="%dpx"`, finalWidth)
-	contentStr = widthRegex.ReplaceAllString(contentStr, widthReplacement)
-
-	// Replace height attribute
-	heightReplacement := fmt.Sprintf(`height="%dpx"`, finalHeight)
-	contentStr = heightRegex.ReplaceAllString(contentStr, heightReplacement)
-
-	return []byte(contentStr)
-}
-
-// isURL checks if the given string is a valid URL
-func isURL(str string) bool {
-	_, err := url.Parse(str)
-	return err == nil && (strings.HasPrefix(str, "http://") || strings.HasPrefix(str, "https://"))
-}
-
-// debugURL downloads a small portion of a URL to see what it returns
-func debugURL(url string) {
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
+func downloadImageContent(imageURL string) ([]byte, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(imageURL)
 	if err != nil {
-		log.Printf("Debug: Failed to create request for %s: %v", url, err)
-		return
-	}
-
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Debug: Failed to download %s: %v", url, err)
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
-
-	log.Printf("Debug: %s - Status: %d, Content-Type: %s, Content-Length: %d",
-		url, resp.StatusCode, resp.Header.Get("Content-Type"), resp.ContentLength)
-
-	// Read first 500 bytes to see what we're getting
-	buf := make([]byte, 500)
-	n, err := resp.Body.Read(buf)
-	if err != nil && err != io.EOF {
-		log.Printf("Debug: Failed to read response body: %v", err)
-		return
-	}
-
-	content := string(buf[:n])
-	if len(content) > 200 {
-		content = content[:200] + "..."
-	}
-	log.Printf("Debug: %s - First 200 chars: %s", url, content)
-}
-
-// downloadImage downloads an image from a URL and saves it to a temporary file
-func downloadImage(imageURL string) (*os.File, error) {
-	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	// Create request with proper headers
-	req, err := http.NewRequest("GET", imageURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
-	}
-
-	// Add headers to mimic a real browser request
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Accept", "image/webp,image/apng,image/*,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-
-	// Make the request
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to download image: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Check if the response is successful
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+		return nil, fmt.Errorf("bad status: %s", resp.Status)
 	}
-
-	// Check content type to ensure it's an image
-	contentType := resp.Header.Get("Content-Type")
-	log.Printf("Debug: %s - Content-Type: %s, Content-Length: %d", imageURL, contentType, resp.ContentLength)
-
-	if !strings.HasPrefix(contentType, "image/") {
-		return nil, fmt.Errorf("not an image: content-type is %s", contentType)
-	}
-
-	// Create a temporary file
-	tempFile, err := os.CreateTemp("", "image_*.tmp")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temporary file: %v", err)
-	}
-
-	// Copy the response body to the temporary file
-	bytesWritten, err := io.Copy(tempFile, resp.Body)
-	if err != nil {
-		tempFile.Close()
-		os.Remove(tempFile.Name())
-		return nil, fmt.Errorf("failed to save image to temporary file: %v", err)
-	}
-
-	log.Printf("Debug: %s - Wrote %d bytes to %s", imageURL, bytesWritten, tempFile.Name())
-
-	// Seek to the beginning of the file
-	_, err = tempFile.Seek(0, 0)
-	if err != nil {
-		tempFile.Close()
-		os.Remove(tempFile.Name())
-		return nil, fmt.Errorf("failed to seek to beginning of file: %v", err)
-	}
-
-	return tempFile, nil
+	return io.ReadAll(resp.Body)
 }
 
-// validateImageFile checks if a file is a valid image by attempting to decode it
-func validateImageFile(filePath string) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	// Check if file is HTML (error page)
-	buf := make([]byte, 1024) // Increased buffer size for better detection
-	n, err := file.Read(buf)
-	if err != nil && err != io.EOF {
-		return err
-	}
-
-	content := strings.ToLower(string(buf[:n]))
-
-	// Check for various HTML indicators
-	if strings.Contains(content, "<html") ||
-		strings.Contains(content, "<!doctype") ||
-		strings.Contains(content, "<head") ||
-		strings.Contains(content, "<body") ||
-		strings.Contains(content, "error") ||
-		strings.Contains(content, "not found") ||
-		strings.Contains(content, "forbidden") ||
-		strings.Contains(content, "access denied") {
-		return fmt.Errorf("downloaded file appears to be an HTML page (likely an error page), not an image")
-	}
-
-	// Check for SVG content
-	if strings.Contains(content, "<?xml") && strings.Contains(content, "<svg") {
-		// This is an SVG file, which is valid
-		return nil
-	}
-
-	// Check for common image file signatures
-	if strings.HasPrefix(content, "\x89png\r\n\x1a\n") || // PNG
-		strings.HasPrefix(content, "\xff\xd8\xff") || // JPEG
-		strings.HasPrefix(content, "gif87a") || // GIF87a
-		strings.HasPrefix(content, "gif89a") { // GIF89a
-		// File has valid image signature, skip strict validation
-		return nil
-	}
-
-	// Reset file pointer and validate as image
-	file.Seek(0, 0)
-	_, _, err = image.DecodeConfig(file)
-	if err != nil {
-		// Try to provide more specific error information
-		if strings.Contains(err.Error(), "unknown format") {
-			return fmt.Errorf("image format not recognized - file may be corrupted or not an image")
-		}
-		return err
-	}
-
-	return nil
-}
-
-// resizeImage resizes an image to the specified dimensions
 func resizeImage(img image.Image, targetWidth, targetHeight int) image.Image {
-	bounds := img.Bounds()
-	srcWidth := bounds.Dx()
-	srcHeight := bounds.Dy()
+	srcWidth := img.Bounds().Dx()
+	srcHeight := img.Bounds().Dy()
 
-	// If no dimensions are specified, default to a max width of 400px if the image is wider.
 	if targetWidth <= 0 && targetHeight <= 0 {
 		if srcWidth > 400 {
 			targetWidth = 400
-			targetHeight = int(float64(targetWidth) * float64(srcHeight) / float64(srcWidth))
 		} else {
-			// Image is already within the default size, return original
-			return img
-		}
-	} else {
-		// If only one dimension is specified, calculate the other to maintain aspect ratio
-		if targetWidth > 0 && targetHeight == 0 {
-			targetHeight = int(float64(targetWidth) * float64(srcHeight) / float64(srcWidth))
-		} else if targetHeight > 0 && targetWidth == 0 {
-			targetWidth = int(float64(targetHeight) * float64(srcWidth) / float64(srcHeight))
+			return img // No resize needed
 		}
 	}
 
-	// If there's nothing to do, return original image
+	if targetWidth > 0 && targetHeight <= 0 {
+		targetHeight = int(float64(targetWidth) * float64(srcHeight) / float64(srcWidth))
+	} else if targetHeight > 0 && targetWidth <= 0 {
+		targetWidth = int(float64(targetHeight) * float64(srcWidth) / float64(srcHeight))
+	}
+
 	if targetWidth == srcWidth && targetHeight == srcHeight {
 		return img
 	}
 
-	// Create new image with target dimensions
 	resized := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
-
-	// Use high-quality scaling
 	draw.ApproxBiLinear.Scale(resized, resized.Bounds(), img, img.Bounds(), draw.Over, nil)
-
 	return resized
 }
 
-// getMimeType determines the MIME type based on file extension
-func getMimeType(filePath string) string {
-	ext := strings.ToLower(filepath.Ext(filePath))
-
-	switch ext {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".svg":
-		return "image/svg+xml"
-	case ".webp":
-		return "image/webp"
-	case ".bmp":
-		return "image/bmp"
-	case ".ico":
-		return "image/x-icon"
-	default:
-		return "image/jpeg" // Default fallback
+func updateSVGDimensions(content []byte, targetWidth, targetHeight int) []byte {
+	// This is a simplified implementation. A more robust one would parse the SVG XML.
+	widthRegex := regexp.MustCompile(`width=["']([^"']+)["']`)
+	heightRegex := regexp.MustCompile(`height=["']([^"']+)["']`)
+	contentStr := string(content)
+	if targetWidth > 0 {
+		contentStr = widthRegex.ReplaceAllString(contentStr, fmt.Sprintf(`width="%d"`, targetWidth))
 	}
+	if targetHeight > 0 {
+		contentStr = heightRegex.ReplaceAllString(contentStr, fmt.Sprintf(`height="%d"`, targetHeight))
+	}
+	return []byte(contentStr)
+}
+
+func isURL(str string) bool {
+	u, err := url.Parse(str)
+	return err == nil && u.Scheme != "" && u.Host != ""
 }

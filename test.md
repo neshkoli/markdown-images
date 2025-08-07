@@ -9,7 +9,7 @@
 ![Flower](https://images.vexels.com/media/users/3/183743/isolated/lists/44814ff812b9c94eb03450bc2a1bd667-tropical-flowers-leaf-arrangement.png){: width=50 height=50}
 
 # Huge file
-![swamp](https://www.ducks.ca/assets/2023/03/swamp_copy.jpg){: width=100 }
+![swamp](https://www.ducks.ca/assets/2023/03/swamp_copy.jpg){: width=800 }
 
 ## Internal svg image
 
@@ -17,7 +17,7 @@
 
 ## External svg image
 
-![Frog](https://www.svgrepo.com/download/500113/frog.svg){: width=100 height=50}
+![Frog](https://www.svgrepo.com/download/500113/frog.svg){: height=50  }
 
 ## html format
 
